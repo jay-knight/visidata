@@ -19,24 +19,19 @@ def openurl_postgres(url, filetype=None):
     import psycopg2
 
     dbname = url.path[1:]
-    conn = psycopg2.connect(
-                user=url.username,
-                dbname=dbname,
-                host=url.hostname,
-                port=url.port,
-                password=url.password)
+    conn = psycopg2.connect(str(url))
 
-    return PgTablesSheet(dbname+"_tables", sql=SQL(conn))
+    return PgSchemasSheet(dbname+"_tables", sql=SQL(conn))
 
 
 class SQL:
     def __init__(self, conn):
         self.conn = conn
 
-    def cur(self, qstr):
+    def cur(self, qstr, *args):
         randomname = ''.join(random.choice(string.ascii_uppercase) for _ in range(6))
         cur = self.conn.cursor(randomname)
-        cur.execute(qstr)
+        cur.execute(qstr, *args)
         return cur
 
     @asyncthread
@@ -54,13 +49,11 @@ def cursorToColumns(cur):
     return cols
 
 
-
-# rowdef: (table_name, ncols)
-class PgTablesSheet(Sheet):
-    rowtype = 'tables'
+class PgSchemasSheet(Sheet):
+    rowtype = 'schemas'
 
     def reload(self):
-        qstr = "SELECT table_name, COUNT(column_name) AS ncols FROM information_schema.columns WHERE table_schema = 'public' GROUP BY table_name"
+        qstr = "select schema_name, schema_owner from information_schema.schemata where schema_name  !~ '^pg_(toast|temp)' order by schema_name;"
 
         with self.sql.cur(qstr) as cur:
             self.nrowsPerTable = {}
@@ -71,8 +64,30 @@ class PgTablesSheet(Sheet):
             if r:
                 self.addRow(r)
             self.columns = cursorToColumns(cur)
+            self.setKeys(self.columns[0:1])  # schema_name is the key
+            for r in cur:
+                self.addRow(r)
+
+PgSchemasSheet.addCommand(ENTER, 'dive-row', 'vd.push(PgTablesSheet(name+"."+cursorRow[0], source=cursorRow[0], sql=sql))')
+
+# rowdef: (table_name, ncols)
+class PgTablesSheet(Sheet):
+    rowtype = 'tables'
+
+    def reload(self):
+        qstr = "SELECT table_name, table_schema, COUNT(column_name) AS ncols FROM information_schema.columns WHERE table_schema = %s GROUP BY table_name, table_schema order by table_name"
+
+        with self.sql.cur(qstr, (self.source,)) as cur:
+            self.nrowsPerTable = {}
+
+            self.rows = []
+            # try to get first row to make cur.description available
+            r = cur.fetchone()
+            if r:
+                self.addRow(r)
+            self.columns = cursorToColumns(cur)
             self.setKeys(self.columns[0:1])  # table_name is the key
-            self.addColumn(Column('nrows', type=int, getter=lambda col,row: col.sheet.getRowCount(row[0])))
+            #self.addColumn(Column('nrows', type=int, getter=lambda col,row: col.sheet.getRowCount(row[0])))
 
             for r in cur:
                 self.addRow(r)
@@ -89,7 +104,7 @@ class PgTablesSheet(Sheet):
 
         return self.nrowsPerTable[tablename]
 
-PgTablesSheet.addCommand(ENTER, 'dive-row', 'vd.push(PgTable(name+"."+cursorRow[0], source=cursorRow[0], sql=sql))')
+PgTablesSheet.addCommand(ENTER, 'dive-row', 'vd.push(PgTable(name+"."+cursorRow[0], source=cursorRow[1] + "." + cursorRow[0], sql=sql))')
 
 # rowdef: tuple of values as returned by fetchone()
 class PgTable(Sheet):
